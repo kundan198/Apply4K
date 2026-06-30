@@ -1,0 +1,30 @@
+.vercel
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+extension/node_modules/
+
+# Python environments and caches
+.venv/
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build outputs
+dist/
+frontend/dist/
+extension/dist/
+*.tsbuildinfo
+
+# Local data and secrets
+.env
+backend/.env
+*.db
+*.sqlite
+*.sqlite3
+apify_jobs_raw.json
+
+# Generated local artifacts
+generated_applications/

@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: apply4k-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: apply4k-db
+          property: connectionString
+      - key: CORS_ORIGINS
+        value: https://apply4k-web.onrender.com
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: APIFY_TOKEN
+        sync: false
+
+  - type: web
+    name: apply4k-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE
+        value: https://apply4k-api.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+databases:
+  - name: apply4k-db
+    databaseName: apply4k
+    user: apply4k
