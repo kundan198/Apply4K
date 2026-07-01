@@ -1,22 +1,28 @@
 services:
+  # --- Backend API (FastAPI + scraper) — FREE web service, no request timeout ---
   - type: web
     name: apply4k-api
     runtime: python
+    plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
     envVars:
+      # Persistent Postgres (free). Comment this block out to run without a DB —
+      # the scraper still works; it just falls back to ephemeral storage.
       - key: DATABASE_URL
         fromDatabase:
           name: apply4k-db
           property: connectionString
       - key: CORS_ORIGINS
-        value: https://apply4k-web.onrender.com
+        value: https://apply4k-web.onrender.com,https://apply4k-kundan.web.app
       - key: OPENAI_API_KEY
-        sync: false
-      - key: APIFY_TOKEN
-        sync: false
+        sync: false          # optional — leave blank to run in free mock mode
+      - key: ENABLE_APIFY
+        value: "false"       # LinkedIn/Apify off (paid + slow); free ATS sources only
 
+  # --- Frontend (static site) — always FREE on Render ---
   - type: web
     name: apply4k-web
     runtime: static
@@ -31,7 +37,9 @@ services:
         source: /*
         destination: /index.html
 
+# Free Postgres (one per account; Render emails before the free instance expires).
 databases:
   - name: apply4k-db
     databaseName: apply4k
     user: apply4k
+    plan: free
