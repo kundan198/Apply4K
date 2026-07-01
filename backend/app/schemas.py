@@ -131,7 +131,10 @@ class JobScrapeRequest(BaseModel):
     location: str = "United States"
     count: int = Field(default=50, ge=10, le=100)
     posted_hours: int = Field(default=24, ge=1, le=168)
-    max_age_days: int = Field(default=3, ge=1, le=7)
+    # ATS boards (Greenhouse/Lever/Ashby) list real posting dates that are often
+    # older than a few days; the 45-day cap matches SCORING_RULES' freshness rule
+    # so evergreen new-grad roles aren't dropped as "old".
+    max_age_days: int = Field(default=30, ge=1, le=60)
     accuracy_first: bool = True
     min_score: int = Field(default=85, ge=0, le=100)
     limit: int = Field(default=12, ge=5, le=12)

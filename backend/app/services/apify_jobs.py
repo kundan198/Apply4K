@@ -16,6 +16,7 @@ import httpx
 from ..config import settings
 from ..models import Resume
 from . import scorer
+from . import job_sources
 from .profile import DEFAULT_SKILLS
 
 
@@ -78,6 +79,10 @@ EXCLUDED_TITLE_TERMS = (
     "communications systems",
 )
 EXCLUDED_COMPANY_TERMS = (
+    # Defense/aerospace primes that typically require U.S. citizenship or an
+    # active clearance — a hard no for an international-student candidate. This is
+    # a best-effort guard for sources (e.g. SimplifyJobs) whose short descriptions
+    # don't carry the real JD text for the scorer's citizenship/clearance detector.
     "rtx",
     "raytheon",
     "kbr",
@@ -86,8 +91,82 @@ EXCLUDED_COMPANY_TERMS = (
     "general dynamics",
     "mission systems",
     "boeing",
+    "lockheed",
+    "northrop",
+    "l3harris",
+    "united launch",
+    "sierra nevada corp",
+    "anduril",
+    "leidos",
+    "saic",
+    "booz allen",
+    "peraton",
+    "caci",
+    "ba systems",  # BAE Systems
 )
 EXCLUDED_LOCATION_TERMS = ("afb",)
+# Clearly non-US location signals — drop these (unless a US signal also appears).
+NON_US_LOCATION_TERMS = (
+    "india",
+    "london",
+    "united kingdom",
+    " uk",
+    "uk ",
+    "emea",
+    "apac",
+    "germany",
+    "berlin",
+    "france",
+    "paris",
+    "spain",
+    "madrid",
+    "barcelona",
+    "netherlands",
+    "amsterdam",
+    "ireland",
+    "dublin",
+    "canada",
+    "toronto",
+    "vancouver",
+    "ontario",
+    "australia",
+    "sydney",
+    "singapore",
+    "japan",
+    "tokyo",
+    "brazil",
+    "mexico",
+    "poland",
+    "portugal",
+    "lisbon",
+    "bengaluru",
+    "bangalore",
+    "hyderabad",
+    "pune",
+    "gurgaon",
+    "philippines",
+    "argentina",
+    "colombia",
+    "nigeria",
+    "kenya",
+    "south africa",
+    "israel",
+    "tel aviv",
+    "dubai",
+    "uae",
+)
+# Signals that a location is US-based (keep even if a broad term is ambiguous).
+US_LOCATION_TERMS = (
+    "united states",
+    "u.s.",
+    "us,",
+    ", us",
+    "usa",
+    "remote - us",
+    "remote us",
+    "remote, us",
+    "remote (us",
+)
 CLOSED_PHRASES = (
     "no longer accepting applications",
     "not accepting applications",
@@ -142,21 +221,31 @@ def discover_jobs(
     excluded_company_titles: Optional[set] = None,
     excluded_url_keys: Optional[set] = None,
 ) -> Dict[str, Any]:
-    """Run Apify and return scored jobs plus run metadata."""
-    if not settings.APIFY_TOKEN.strip():
-        raise ApifyJobError("APIFY_TOKEN is not configured.")
+    """Run free ATS sources (+ optional Apify) and return scored jobs plus metadata.
 
-    raw_items = _simplify_new_grad_jobs(max_age_days=max_age_days, count=count)
-    try:
-        raw_items.extend(
-            _run_actor(
-                urls=_linkedin_urls(searches or DEFAULT_SEARCHES, location, posted_hours),
-                count=count,
+    Free sources (Greenhouse/Lever/Ashby via job_sources, plus SimplifyJobs)
+    always run and require no APIFY_TOKEN. The slow Apify LinkedIn actor only
+    runs when both settings.APIFY_TOKEN is set and settings.ENABLE_APIFY is true.
+    """
+    # Free ATS boards — no auth, fast, always on.
+    raw_items = job_sources.fetch_all_jobs()
+    # SimplifyJobs New-Grad list — free, always on.
+    raw_items.extend(_simplify_new_grad_jobs(max_age_days=max_age_days, count=count))
+
+    # Slow Apify LinkedIn actor is opt-in (exceeds serverless timeouts).
+    if settings.ENABLE_APIFY and settings.APIFY_TOKEN.strip():
+        try:
+            raw_items.extend(
+                _run_actor(
+                    urls=_linkedin_urls(
+                        searches or DEFAULT_SEARCHES, location, posted_hours
+                    ),
+                    count=count,
+                )
             )
-        )
-    except ApifyJobError:
-        if not raw_items:
-            raise
+        except ApifyJobError:
+            # Never let a LinkedIn failure sink the free sources.
+            pass
 
     resume_skills = (resume.skills if resume else None) or DEFAULT_SKILLS
     resume_projects = (resume.projects if resume else None) or scorer.projects_from_resume_text(
@@ -179,7 +268,7 @@ def discover_jobs(
     excluded_company_titles = excluded_company_titles or set()
     excluded_url_keys = excluded_url_keys or set()
 
-    verify_client = httpx.Client(follow_redirects=True, timeout=8.0)
+    verify_client = httpx.Client(follow_redirects=True, timeout=5.0)
 
     for item in raw_items:
         job = _normalize(item)
@@ -188,9 +277,9 @@ def discover_jobs(
         if accuracy_first and not job.get("url"):
             filtered_no_apply += 1
             continue
-        if accuracy_first and not _apply_link_ok(verify_client, job.get("url"), job.get("source")):
-            filtered_unverified += 1
-            continue
+        # NOTE: live apply-link verification happens AFTER ranking, only on the
+        # final shortlist — verifying every raw ATS posting here (thousands of
+        # sequential HTTP calls) would blow the serverless time budget.
 
         blob = f"{job['title']} {job['description']}".lower()
         if any(phrase in blob for phrase in CLOSED_PHRASES):
@@ -248,13 +337,29 @@ def discover_jobs(
             }
         )
 
-    verify_client.close()
-
     normalized.sort(key=_rank_key, reverse=True)
     result_limit = limit if accuracy_first else count
+
+    # Verify apply links only on the ranked shortlist, walking down until we have
+    # `result_limit` live links. This bounds network calls to ~result_limit
+    # instead of one per raw posting, keeping the run inside the serverless budget.
+    final: List[Dict[str, Any]] = []
+    if accuracy_first:
+        for job in normalized:
+            if len(final) >= result_limit:
+                break
+            if _apply_link_ok(verify_client, job.get("url"), job.get("source")):
+                final.append(job)
+            else:
+                filtered_unverified += 1
+    else:
+        final = normalized[:result_limit]
+
+    verify_client.close()
+
     return {
         "scraped": len(raw_items),
-        "kept": len(normalized),
+        "kept": len(final),
         "filtered_closed": filtered_closed,
         "filtered_old": filtered_old,
         "filtered_duplicate": filtered_duplicate,
@@ -266,7 +371,7 @@ def discover_jobs(
         "filtered_unverified": filtered_unverified,
         "min_score": min_score,
         "limit": result_limit,
-        "jobs": normalized[:result_limit],
+        "jobs": final,
     }
 
 
@@ -451,7 +556,58 @@ def _company_location_ok(company: str, location: Optional[str]) -> bool:
         return False
     if any(term in location_value for term in EXCLUDED_LOCATION_TERMS):
         return False
+    if not _location_us_ok(location_value):
+        return False
     return True
+
+
+def _location_us_ok(location_value: str) -> bool:
+    """Keep remote-US / US-state / United-States; drop clearly non-US.
+
+    Unknown/empty locations pass (biased toward keeping, since many verified
+    US boards expose sparse or blank location strings). A location that names a
+    clearly non-US place is dropped unless it also carries an explicit US
+    signal (e.g. a multi-hub "US / London" listing).
+    """
+    if not location_value.strip():
+        return True
+    has_us = any(term in location_value for term in US_LOCATION_TERMS)
+    if has_us:
+        return True
+    if _has_us_state(location_value):
+        return True
+    if any(term in location_value for term in NON_US_LOCATION_TERMS):
+        return False
+    # "Remote" with no country qualifier — accept as remote-US-friendly.
+    return True
+
+
+_US_STATE_RE = re.compile(
+    r"(?<![a-z])(al|ak|az|ar|ca|co|ct|de|dc|fl|ga|hi|id|il|in|ia|ks|ky|la|"
+    r"me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|"
+    r"tn|tx|ut|vt|va|wa|wv|wi|wy)(?![a-z])"
+)
+_US_CITY_TERMS = (
+    "new york",
+    "san francisco",
+    "seattle",
+    "boston",
+    "austin",
+    "chicago",
+    "denver",
+    "atlanta",
+    "los angeles",
+    "san jose",
+    "mountain view",
+    "palo alto",
+    "washington",
+)
+
+
+def _has_us_state(location_value: str) -> bool:
+    if _US_STATE_RE.search(location_value):
+        return True
+    return any(term in location_value for term in _US_CITY_TERMS)
 
 
 def _source_from_url(url: Any) -> str:

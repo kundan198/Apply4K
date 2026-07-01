@@ -114,8 +114,13 @@ def _existing_application_urls(db: Session) -> set:
 
 @router.post("/scrape", response_model=JobScrapeResult)
 def scrape_jobs(payload: JobScrapeRequest, db: Session = Depends(get_db)) -> dict:
-    """Run the Apify LinkedIn scraper, score matches, and save recommendations."""
-    resume = _resume_or_404(db, payload.resume_id)
+    """Discover jobs from free ATS sources, score matches, and save recommendations.
+
+    Falls back to the candidate's default skill profile when no resume has been
+    uploaded yet, so the "Find jobs" flow works before the first upload.
+    """
+    resume = db.get(Resume, payload.resume_id)
+    resume_id = resume.id if resume else None
     existing = _existing_job_keys(db) | _existing_application_keys(db)
     existing_urls = _existing_job_urls(db) | _existing_application_urls(db)
     try:
@@ -161,14 +166,14 @@ def scrape_jobs(payload: JobScrapeRequest, db: Session = Depends(get_db)) -> dic
         db.add(
             Application(
                 user_id=DEMO_USER_ID,
-                resume_id=resume.id,
+                resume_id=resume_id,
                 job_id=job.id,
                 company=item["company"],
                 job_title=item["title"],
                 location=item.get("location"),
                 job_link=item.get("url"),
                 fit_score=item.get("score"),
-                resume_version=resume.filename,
+                resume_version=resume.filename if resume else None,
                 status="Saved",
                 notes="Auto-saved by accuracy-first scraper.",
             )
@@ -210,10 +215,11 @@ def recommendations(
     min_score: int = Query(default=85, ge=0, le=100),
     db: Session = Depends(get_db),
 ) -> List[Job]:
-    """Top scored saved jobs, deduped and filtered to accuracy-first matches."""
-    if resume_id is not None:
-        _resume_or_404(db, resume_id)
+    """Top scored saved jobs, deduped and filtered to accuracy-first matches.
 
+    resume_id is accepted for symmetry but not required — the feed reads from
+    saved jobs, so a missing/not-yet-uploaded resume must not break it.
+    """
     jobs = list(
         db.scalars(
             select(Job)
