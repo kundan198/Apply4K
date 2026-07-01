@@ -94,7 +94,7 @@ function writeLastOutputKeys(jobs: Job[]) {
 }
 
 export default function Jobs() {
-  const { activeResume } = useStore();
+  const { activeResume, loading: storeLoading } = useStore();
   const { toast } = useToast();
   const [form, setForm] = React.useState<JobInput>({
     title: "",
@@ -116,7 +116,13 @@ export default function Jobs() {
   const [scoreSectionMinimized, setScoreSectionMinimized] = React.useState(false);
 
   React.useEffect(() => {
-    if (!activeResume) return;
+    if (storeLoading) return;
+    if (!activeResume) {
+      setRecs([]);
+      setApplications([]);
+      setLoadingRecs(false);
+      return;
+    }
     setLoadingRecs(true);
     Promise.all([
       jobsApi.recommendations(activeResume.id, RECOMMENDATION_LIMIT),
@@ -126,8 +132,15 @@ export default function Jobs() {
       writeLastOutputKeys(jobs);
       setApplications(apps);
       setLoadingRecs(false);
+    }).catch((error) => {
+      setLoadingRecs(false);
+      toast({
+        kind: "error",
+        title: "Could not load jobs",
+        description: error instanceof Error ? error.message : "Please try again.",
+      });
     });
-  }, [activeResume]);
+  }, [activeResume, storeLoading, toast]);
 
   const update = (patch: Partial<JobInput>) =>
     setForm((f) => ({ ...f, ...patch }));
@@ -563,7 +576,7 @@ export default function Jobs() {
           <Button
             variant="secondary"
             onClick={runScrape}
-            disabled={scraping || !activeResume}
+            disabled={scraping || storeLoading || !activeResume}
           >
             {scraping ? <Spinner className="h-4 w-4" /> : <CloudLightning className="h-4 w-4" />}
             {scraping ? "Scraping…" : "Scrape fresh jobs"}
@@ -574,7 +587,14 @@ export default function Jobs() {
         </div>
       </div>
 
-      {loadingRecs ? (
+      {!activeResume && !storeLoading ? (
+        <Card className="p-8 text-center">
+          <p className="font-medium">Resume needed before scraping.</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Upload or select your resume first, then this page can score and scrape matching jobs.
+          </p>
+        </Card>
+      ) : loadingRecs ? (
         <div className="flex h-40 items-center justify-center text-muted-foreground">
           <Spinner className="mr-2 h-5 w-5" /> Loading recommendations…
         </div>

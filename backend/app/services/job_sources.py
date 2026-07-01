@@ -27,11 +27,13 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 
-# Per-request and whole-aggregation time budgets (seconds). Tuned to stay well
-# under a serverless 30-60s function limit.
-REQUEST_TIMEOUT = 6.0
-TOTAL_BUDGET = 30.0
-MAX_WORKERS = 12
+# Per-request and whole-aggregation time budgets (seconds). Tuned to fit inside
+# a tight serverless function limit (Vercel Hobby caps at ~10s), leaving room for
+# scoring + link verification downstream. Raise TOTAL_BUDGET on a long-timeout
+# host (Render/Fly) for wider company coverage.
+REQUEST_TIMEOUT = 4.0
+TOTAL_BUDGET = 6.0
+MAX_WORKERS = 16
 
 # Curated set of well-known companies that actively hire entry-level / new-grad
 # software engineers and expose one of the three free ATS APIs. slug is the
@@ -92,27 +94,33 @@ def fetch_all_jobs(
     deadline = time.monotonic() + total_budget
     results: List[Dict[str, Any]] = []
 
-    with httpx.Client(
+    client = httpx.Client(
         follow_redirects=True,
         timeout=request_timeout,
         headers={"User-Agent": "Apply4K/1.0 (+job-aggregator)"},
-    ) as client:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(_fetch_company, client, name, cfg): name
-                for name, cfg in companies.items()
-            }
-            for future in as_completed(futures):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    jobs = future.result(timeout=max(0.1, remaining))
-                except Exception:
-                    # Fail soft: skip this company entirely.
-                    continue
-                if jobs:
-                    results.extend(jobs)
+    )
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = {
+            pool.submit(_fetch_company, client, name, cfg): name
+            for name, cfg in companies.items()
+        }
+        for future in as_completed(futures):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                jobs = future.result(timeout=max(0.1, remaining))
+            except Exception:
+                # Fail soft: skip this company entirely.
+                continue
+            if jobs:
+                results.extend(jobs)
+    finally:
+        # Do NOT wait for stragglers — the deadline is the hard cap. Any thread
+        # still in flight is abandoned (its httpx request has its own timeout).
+        pool.shutdown(wait=False)
+        client.close()
     return results
 
 

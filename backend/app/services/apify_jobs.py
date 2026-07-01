@@ -4,6 +4,7 @@ Runs trusted job-board sources plus the configured LinkedIn Apify actor, filters
 recent/legit postings, scores them against a resume, and returns normalized job
 records ready to save.
 """
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from html import unescape
 import re
@@ -103,6 +104,7 @@ EXCLUDED_COMPANY_TERMS = (
     "peraton",
     "caci",
     "ba systems",  # BAE Systems
+    "palantir",    # many roles are US-citizen / gov-cleared only
 )
 EXCLUDED_LOCATION_TERMS = ("afb",)
 # Clearly non-US location signals — drop these (unless a US signal also appears).
@@ -268,7 +270,7 @@ def discover_jobs(
     excluded_company_titles = excluded_company_titles or set()
     excluded_url_keys = excluded_url_keys or set()
 
-    verify_client = httpx.Client(follow_redirects=True, timeout=5.0)
+    verify_client = httpx.Client(follow_redirects=True, timeout=3.0)
 
     for item in raw_items:
         job = _normalize(item)
@@ -340,15 +342,17 @@ def discover_jobs(
     normalized.sort(key=_rank_key, reverse=True)
     result_limit = limit if accuracy_first else count
 
-    # Verify apply links only on the ranked shortlist, walking down until we have
-    # `result_limit` live links. This bounds network calls to ~result_limit
-    # instead of one per raw posting, keeping the run inside the serverless budget.
+    # Verify apply links only on the ranked shortlist, in PARALLEL with a tight
+    # shared budget so the whole check fits inside a serverless timeout. We check
+    # a few extra candidates beyond result_limit so dead links can be replaced.
     final: List[Dict[str, Any]] = []
     if accuracy_first:
-        for job in normalized:
+        shortlist = normalized[: result_limit + 6]
+        verdicts = _verify_links_parallel(verify_client, shortlist)
+        for job, ok in zip(shortlist, verdicts):
             if len(final) >= result_limit:
                 break
-            if _apply_link_ok(verify_client, job.get("url"), job.get("source")):
+            if ok:
                 final.append(job)
             else:
                 filtered_unverified += 1
@@ -418,7 +422,7 @@ def _run_actor(urls: List[str], count: int) -> List[Dict[str, Any]]:
 
 def _simplify_new_grad_jobs(max_age_days: int, count: int) -> List[Dict[str, Any]]:
     try:
-        resp = httpx.get(SIMPLIFY_NEW_GRAD_URL, timeout=20.0)
+        resp = httpx.get(SIMPLIFY_NEW_GRAD_URL, timeout=6.0)
         resp.raise_for_status()
     except httpx.HTTPError:
         return []
@@ -674,6 +678,40 @@ def _apply_link_ok(client: httpx.Client, url: Any, source: Any) -> bool:
         return 200 <= resp.status_code < 400
     except httpx.HTTPError:
         return False
+
+
+def _verify_links_parallel(
+    client: httpx.Client, jobs: List[Dict[str, Any]], budget: float = 4.0
+) -> List[bool]:
+    """Verify a shortlist's apply links concurrently within a shared time budget.
+
+    Returns bools aligned with `jobs`. Any check that errors OR does not finish
+    within the budget defaults to True (kept) — ATS/board apply URLs are
+    canonical, so a slow verifier must never drop a good match. This keeps the
+    whole verification step to roughly one request's latency instead of N.
+    """
+    if not jobs:
+        return []
+    results = [True] * len(jobs)
+    deadline = time.monotonic() + budget
+    pool = ThreadPoolExecutor(max_workers=min(8, len(jobs)))
+    try:
+        futures = {
+            pool.submit(_apply_link_ok, client, job.get("url"), job.get("source")): idx
+            for idx, job in enumerate(jobs)
+        }
+        for future in as_completed(futures):
+            idx = futures[future]
+            remaining = deadline - time.monotonic()
+            try:
+                results[idx] = future.result(timeout=max(0.05, remaining))
+            except Exception:
+                results[idx] = True  # keep on timeout / network error
+    finally:
+        # Don't block the response waiting on stragglers; per-request httpx
+        # timeout (3s) bounds any thread still in flight.
+        pool.shutdown(wait=False)
+    return results
 
 
 def _apify_error(resp: httpx.Response) -> str:

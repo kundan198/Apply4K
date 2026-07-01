@@ -32,6 +32,20 @@ Apply4K/
 
 ## Quick start
 
+### One-click local start
+
+From the project root:
+
+```bash
+./scripts/run-local.sh
+```
+
+On macOS, you can also double-click `Start Apply4K.command`.
+
+App URL: http://127.0.0.1:5174/jobs
+
+Keep the terminal window open while using the app. Press `Ctrl+C` in that window to stop both servers.
+
 ### 1. Backend
 ```bash
 cd backend
