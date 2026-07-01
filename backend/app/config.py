@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     APIFY_LINKEDIN_ACTOR: str = "curious_coder/linkedin-jobs-scraper"
     DATABASE_URL: str = DEFAULT_DATABASE_URL
     # Comma-separated origins. chrome-extension://* is handled separately via regex.
-    CORS_ORIGINS: str = "http://localhost:5173"
+    CORS_ORIGINS: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:5174,http://127.0.0.1:5174,"
+        "https://apply4k-kundan.web.app,https://apply4k-kundan.firebaseapp.com"
+    )
 
     @property
     def cors_origins_list(self) -> List[str]:

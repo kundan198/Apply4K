@@ -65,15 +65,34 @@ async function request<T>(
       }
     }
     const res = await fetch(url, init);
+    const contentType = res.headers.get("content-type") ?? "";
     if (!res.ok) {
       let message = `HTTP ${res.status}`;
       try {
-        const body = (await res.json()) as { detail?: unknown };
-        if (typeof body.detail === "string") message = body.detail;
+        if (contentType.includes("application/json")) {
+          const body = (await res.json()) as { detail?: unknown };
+          if (typeof body.detail === "string") message = body.detail;
+        } else {
+          const text = await res.text();
+          if (text.trim().startsWith("<")) {
+            message = `Backend route ${path} returned an HTML page instead of JSON. Check VITE_API_BASE or start the API server.`;
+          } else if (text.trim()) {
+            message = text.trim().slice(0, 240);
+          }
+        }
       } catch {
         // Keep the HTTP status when the backend did not return JSON.
       }
       throw new Error(message);
+    }
+    if (!contentType.includes("application/json")) {
+      const text = await res.text();
+      const looksLikeHtml = text.trim().startsWith("<");
+      throw new Error(
+        looksLikeHtml
+          ? `Backend route ${path} returned the app HTML instead of JSON. The frontend is not connected to the API. Set VITE_API_BASE to your backend URL or run the backend locally.`
+          : `Backend route ${path} returned ${contentType || "unknown content"} instead of JSON.`,
+      );
     }
     // DELETE endpoints may return {ok:true}; callers handle shape.
     return (await res.json()) as T;
